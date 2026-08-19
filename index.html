@@ -297,6 +297,25 @@ async function sb(path){
   return res.json();
 }
 
+async function sbInsert(table, row){
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+    method:'POST',
+    headers:{
+      apikey: SUPABASE_ANON_KEY, Authorization:`Bearer ${SUPABASE_ANON_KEY}`,
+      'Content-Type':'application/json', 'Prefer':'return=minimal'
+    },
+    body: JSON.stringify(row)
+  });
+  if(!res.ok) throw new Error(`Erreur Supabase (${table}) ${res.status}`);
+}
+function uuid(){
+  return (crypto.randomUUID ? crypto.randomUUID() :
+    'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c=>{
+      const r = Math.random()*16|0, v = c==='x'?r:(r&0x3|0x8);
+      return v.toString(16);
+    }));
+}
+
 /* ============================================================
    Icônes (monoline, par mot-clé)
    ============================================================ */
@@ -557,30 +576,52 @@ async function renderExtras(){
 }
 
 /* ============================================================
-   Étape 4 — Plages (SIMULÉES — Phase 3 remplacera ce bloc par
-   le vrai moteur de calcul de trajet / disponibilité)
+   Étape 4 — Plages RÉELLES, calculées à partir de la table jobs
+   (capacité simultanée simple = nb de vans, pas encore d'assignation
+   par van individuel ni de calcul de trajet — ça viendra en Phase 2/3)
    ============================================================ */
 const JOURS = ['DIM','LUN','MAR','MER','JEU','VEN','SAM'];
-function generateMockDays(){
+const HEURE_OUVERTURE = 8*60, TAMPON_MIN = 15;
+function heureFermeture(day){ return day.getDay()===5 ? 17*60 : 20*60; } // vendredi 17h, sinon 20h
+
+function prochainsJoursOuvrables(n){
   const days = [];
   let d = new Date();
-  while(days.length < 5){
+  while(days.length < n){
     d.setDate(d.getDate()+1);
     if(d.getDay()!==0 && d.getDay()!==6) days.push(new Date(d));
   }
   return days;
 }
-function generateMockSlots(day){
-  const heures = ['8:00','9:30','11:00','13:00','14:30'];
-  return heures.map((h,i)=>({
-    time:h, eco: (day.getDate()+i)%3===0
-  }));
+function dateStr(d){ return d.toISOString().slice(0,10); }
+function timeToMin(t){ const [h,m] = t.split(':').map(Number); return h*60+m; }
+function minToTimeLabel(m){
+  const h = Math.floor(m/60), mm = m%60;
+  return `${h}:${mm.toString().padStart(2,'0')}`;
 }
-let mockDays = [];
-function renderSlots(){
-  mockDays = generateMockDays();
+
+let availDays = [], jobsParJour = {}, vansCapables = [];
+
+async function renderSlots(){
+  availDays = prochainsJoursOuvrables(5);
+
+  const vsRows = await sb(`van_services?select=van_id&service_id=eq.${state.selectedService.id}`);
+  vansCapables = vsRows.map(r=>r.van_id);
+  if(!vansCapables.length){
+    document.getElementById('dayTabs').innerHTML = '';
+    document.getElementById('slotGrid').innerHTML = `<p class="empty-note">Aucun van n'est configuré pour ce service — contacte-nous directement.</p>`;
+    return;
+  }
+
+  const debut = dateStr(availDays[0]), fin = dateStr(availDays[availDays.length-1]);
+  const jobs = await sb(`jobs_public?select=date,heure_debut,heure_fin,van_id&date=gte.${debut}&date=lte.${fin}`);
+  jobsParJour = {};
+  jobs.forEach(j=>{
+    (jobsParJour[j.date] = jobsParJour[j.date] || []).push(j);
+  });
+
   const tabs = document.getElementById('dayTabs');
-  tabs.innerHTML = mockDays.map((d,i)=>`
+  tabs.innerHTML = availDays.map((d,i)=>`
     <div class="day-tab ${i===0?'selected':''}" data-i="${i}">
       <div class="d">${JOURS[d.getDay()]}</div><div class="n">${d.getDate()}</div>
     </div>`).join('');
@@ -588,26 +629,58 @@ function renderSlots(){
     t.addEventListener('click', ()=>{
       tabs.querySelectorAll('.day-tab').forEach(x=>x.classList.remove('selected'));
       t.classList.add('selected');
-      renderSlotGrid(mockDays[+t.dataset.i]);
+      renderSlotGrid(availDays[+t.dataset.i]);
     });
   });
-  renderSlotGrid(mockDays[0]);
+  renderSlotGrid(availDays[0]);
 }
+
+// Retourne, pour une fenêtre [debutFenetre, finFenetre], les vans capables
+// qui n'ont AUCUN chevauchement ce jour-là (donc libres pour ce créneau)
+function vansLibres(jourJobs, debutFenetre, finFenetre){
+  return vansCapables.filter(vId=>{
+    const jobsVan = jourJobs.filter(j=>j.van_id===vId);
+    const occupe = jobsVan.some(j=>{
+      const jd = timeToMin(j.heure_debut) - TAMPON_MIN;
+      const jf = timeToMin(j.heure_fin) + TAMPON_MIN;
+      return debutFenetre < jf && finFenetre > jd;
+    });
+    return !occupe;
+  });
+}
+
+function creneauxDisponibles(day){
+  const duree = state.dureeInterne || 60;
+  const jourJobs = jobsParJour[dateStr(day)] || [];
+  const fermeture = heureFermeture(day);
+  const slots = [];
+  for(let m = HEURE_OUVERTURE; m + duree <= fermeture; m += 30){
+    const libres = vansLibres(jourJobs, m, m + duree);
+    if(libres.length > 0){
+      slots.push({ time: minToTimeLabel(m), minutes: m });
+    }
+  }
+  return slots;
+}
+
 function renderSlotGrid(day){
   const grid = document.getElementById('slotGrid');
-  const slots = generateMockSlots(day);
+  const slots = creneauxDisponibles(day);
+  if(!slots.length){
+    grid.innerHTML = `<p class="empty-note">Aucune plage disponible cette journée-là — essaie un autre jour.</p>`;
+    return;
+  }
   grid.innerHTML = slots.map(s=>`
-    <div class="slot ${s.eco?'eco':''}" data-time="${s.time}">
+    <div class="slot" data-time="${s.time}">
       <div class="time">${s.time}</div>
-      <div class="note">${s.eco ? 'Équipe déjà dans votre secteur' : 'Plage standard'}</div>
-      ${s.eco?'<span class="badge-eco">-10$ · sauvez la planète et votre portefeuille</span>':''}
+      <div class="note">Plage disponible</div>
     </div>`).join('');
   grid.querySelectorAll('.slot').forEach(el=>{
     el.addEventListener('click', ()=>{
       grid.querySelectorAll('.slot').forEach(x=>x.classList.remove('selected'));
       el.classList.add('selected');
       const s = slots.find(x=>x.time===el.dataset.time);
-      state.selectedSlot = {...s, date: day};
+      state.selectedSlot = { time: s.time, date: day };
       updateTotal(); validateStep();
     });
   });
@@ -691,6 +764,39 @@ async function submitBooking(){
     notes_prix: notesPrix
   };
   const finalArea = document.getElementById('finalArea');
+
+  try{
+    const clientId = uuid();
+    const jobId = uuid();
+    await sbInsert('clients', {
+      id: clientId, nom: state.nom, adresse: `${state.adresse}, ${state.ville}`,
+      lat: state.adresseLat, lng: state.adresseLng,
+      courriel: state.courriel, telephone: state.telephone, type_logement: state.typeLogement
+    });
+    const dureeMin = state.dureeInterne || 60;
+    const heureDebutStr = state.selectedSlot.time.padStart(5,'0') + ':00';
+    const finMinutes = timeToMin(state.selectedSlot.time) + dureeMin;
+    const heureFinStr = minToTimeLabel(finMinutes).padStart(5,'0') + ':00';
+    const jourJobs = jobsParJour[dateStr(state.selectedSlot.date)] || [];
+    const libres = vansLibres(jourJobs, timeToMin(state.selectedSlot.time), finMinutes);
+    if(!libres.length){
+      finalArea.innerHTML = `<div class="final-msg"><h3>Cette plage vient d'être prise</h3><p class="sub">Un autre client a réservé entre-temps — retourne à l'étape précédente pour choisir une autre heure.</p></div>`;
+      return;
+    }
+    await sbInsert('jobs', {
+      id: jobId, client_id: clientId, van_id: libres[0],
+      service_ids: [state.selectedService.id, ...state.options.filter(o=>state.selectedOptions.has(o.id)).map(o=>o.id)],
+      date: state.selectedSlot.date.toISOString().slice(0,10),
+      heure_debut: heureDebutStr, heure_fin: heureFinStr,
+      statut: 'confirmé',
+      adresse: `${state.adresse}, ${state.ville}`, lat: state.adresseLat, lng: state.adresseLng,
+      notes: servicesTexte
+    });
+  }catch(err){
+    finalArea.innerHTML = `<div class="final-msg"><h3>Un problème est survenu</h3><p class="sub">${err.message} — réessayez ou contactez-nous directement.</p></div>`;
+    return;
+  }
+
   if(!WEBHOOK_URL){
     console.log('Payload prêt à envoyer (WEBHOOK_URL non configuré) :', payload);
     finalArea.innerHTML = `<div class="final-msg"><h3>Configuration requise</h3><p class="sub">Le webhook Make.com n'est pas encore branché — les données de cette réservation sont visibles dans la console du navigateur (F12) pour l'instant.</p></div>`;
