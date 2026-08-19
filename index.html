@@ -102,6 +102,9 @@
   .day-tab .n{font-size:16px; font-family:var(--font-display); font-weight:600;}
   .slot-grid{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
   @media(max-width:480px){.slot-grid{grid-template-columns:1fr;}}
+  .slot-section-title{grid-column:1/-1; font-family:var(--font-mono); font-size:11.5px; font-weight:600; text-transform:uppercase; letter-spacing:.04em; color:var(--ink-soft); margin:4px 0 -2px;}
+  .slot-section-title:first-child{margin-top:0;}
+  .slot-section-title.eco{color:var(--green);}
   .slot{border:1.5px solid var(--line); border-radius:10px; padding:12px 14px; cursor:pointer; background:var(--surface); position:relative;}
   .slot:hover{border-color:var(--teal);}
   .slot.selected{border-color:var(--teal); background:var(--teal-tint);}
@@ -652,12 +655,26 @@ function renderSlotGrid(dateISO){
     grid.innerHTML = `<p class="empty-note">Aucune plage disponible cette journée-là — essaie un autre jour.</p>`;
     return;
   }
-  grid.innerHTML = plages.map((p,i)=>`
-    <div class="slot ${p.rabais?'eco':''}" data-i="${i}">
+  const slotHtml = (p) => {
+    const i = plages.indexOf(p);
+    return `<div class="slot ${p.rabais?'eco':''}" data-i="${i}">
       <div class="time">${p.heure_debut}</div>
       <div class="note">Plage disponible</div>
       ${p.rabais?`<span class="badge-eco">-${Number(p.montant_rabais).toFixed(0)} $</span>`:''}
-    </div>`).join('');
+    </div>`;
+  };
+  const eco = plages.filter(p=>p.rabais);
+  const normal = plages.filter(p=>!p.rabais);
+  let html = '';
+  if(eco.length){
+    html += `<div class="slot-section-title eco">🌱 Plages économiques — véhicule déjà dans le secteur</div>`;
+    html += eco.map(slotHtml).join('');
+  }
+  if(normal.length){
+    if(eco.length) html += `<div class="slot-section-title">Autres disponibilités</div>`;
+    html += normal.map(slotHtml).join('');
+  }
+  grid.innerHTML = html;
   grid.querySelectorAll('.slot').forEach(el=>{
     el.addEventListener('click', ()=>{
       grid.querySelectorAll('.slot').forEach(x=>x.classList.remove('selected'));
