@@ -387,7 +387,7 @@ function updateTotal(){
     const qty = state.selectedExtras.get(e.id)||0;
     if(qty>0){ const unit = (e.prix_upsell!=null ? Number(e.prix_upsell) : effectivePrice(e)); prix += unit*qty; duree += Number(e.duree_min_base)*qty; }
   });
-  if(state.selectedSlot && state.selectedSlot.eco) prix -= 10;
+  if(state.selectedSlot && state.selectedSlot.eco) prix -= Number(state.selectedSlot.montant_rabais || 10);
   document.getElementById('totalAmt').textContent = prix.toFixed(2).replace('.',',')+' $';
   state.dureeInterne = duree; // usage interne seulement (webhook / logique de plages) — jamais affiché au client
 }
@@ -576,111 +576,104 @@ async function renderExtras(){
 }
 
 /* ============================================================
-   Étape 4 — Plages RÉELLES, calculées à partir de la table jobs
-   (capacité simultanée simple = nb de vans, pas encore d'assignation
-   par van individuel ni de calcul de trajet — ça viendra en Phase 2/3)
+   Étape 4 — Plages réelles via l'Edge Function "disponibilites"
+   (quarts de travail, jobs déjà planifiés, temps de trajet réel
+   Google Maps, et rabais "client voisin" de 10$ calculés côté serveur)
    ============================================================ */
 const JOURS = ['DIM','LUN','MAR','MER','JEU','VEN','SAM'];
-const HEURE_OUVERTURE = 8*60, TAMPON_MIN = 15;
-function heureFermeture(day){ return day.getDay()===5 ? 17*60 : 20*60; } // vendredi 17h, sinon 20h
 
-function prochainsJoursOuvrables(n){
-  const days = [];
-  let d = new Date();
-  while(days.length < n){
-    d.setDate(d.getDate()+1);
-    if(d.getDay()!==0 && d.getDay()!==6) days.push(new Date(d));
-  }
-  return days;
+function servicesPourApi(){
+  const arr = [{ service_id: state.selectedService.id, quantite: 1 }];
+  state.extras.forEach(e=>{
+    const qty = state.selectedExtras.get(e.id)||0;
+    if(qty>0) arr.push({ service_id: e.id, quantite: qty });
+  });
+  return arr;
 }
-function dateStr(d){ return d.toISOString().slice(0,10); }
-function timeToMin(t){ const [h,m] = t.split(':').map(Number); return h*60+m; }
-function minToTimeLabel(m){
-  const h = Math.floor(m/60), mm = m%60;
-  return `${h}:${mm.toString().padStart(2,'0')}`;
+function optionsPourApi(){
+  return [...state.selectedOptions].map(id=>({ option_id: id, quantite: 1 }));
+}
+function adresseComplete(){
+  return `${state.adresse}, ${state.ville}, QC ${state.codePostal}`;
 }
 
-let availDays = [], jobsParJour = {}, vansCapables = [];
+let plagesParJour = {}, joursDisponibles = [];
 
 async function renderSlots(){
-  availDays = prochainsJoursOuvrables(5);
+  const tabs = document.getElementById('dayTabs');
+  const grid = document.getElementById('slotGrid');
+  tabs.innerHTML = '';
+  grid.innerHTML = '<p class="empty-note">Recherche des disponibilités…</p>';
 
-  const vsRows = await sb(`van_services?select=van_id&service_id=eq.${state.selectedService.id}`);
-  vansCapables = vsRows.map(r=>r.van_id);
-  if(!vansCapables.length){
-    document.getElementById('dayTabs').innerHTML = '';
-    document.getElementById('slotGrid').innerHTML = `<p class="empty-note">Aucun van n'est configuré pour ce service — contacte-nous directement.</p>`;
+  let data;
+  try{
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/disponibilites`, {
+      method:'POST',
+      headers:{ apikey: SUPABASE_ANON_KEY, Authorization:`Bearer ${SUPABASE_ANON_KEY}`, 'Content-Type':'application/json' },
+      body: JSON.stringify({ services: servicesPourApi(), options: optionsPourApi(), adresse: adresseComplete() })
+    });
+    data = await res.json();
+    if(!res.ok) throw new Error(data.erreur || 'Erreur de disponibilités');
+  }catch(err){
+    grid.innerHTML = `<p class="empty-note">Impossible de charger les disponibilités (${err.message}). Réessaie ou contacte-nous directement.</p>`;
     return;
   }
 
-  const debut = dateStr(availDays[0]), fin = dateStr(availDays[availDays.length-1]);
-  const jobs = await sb(`jobs_public?select=date,heure_debut,heure_fin,van_id&date=gte.${debut}&date=lte.${fin}`);
-  jobsParJour = {};
-  jobs.forEach(j=>{
-    (jobsParJour[j.date] = jobsParJour[j.date] || []).push(j);
-  });
+  state.validationRequise = !!data.validation_requise;
+  plagesParJour = {};
+  (data.plages||[]).forEach(p=>{ (plagesParJour[p.date] = plagesParJour[p.date]||[]).push(p); });
+  joursDisponibles = Object.keys(plagesParJour).sort();
 
-  const tabs = document.getElementById('dayTabs');
-  tabs.innerHTML = availDays.map((d,i)=>`
-    <div class="day-tab ${i===0?'selected':''}" data-i="${i}">
-      <div class="d">${JOURS[d.getDay()]}</div><div class="n">${d.getDate()}</div>
-    </div>`).join('');
+  if(!joursDisponibles.length){
+    grid.innerHTML = `<p class="empty-note">Aucune plage disponible pour le moment — contacte-nous directement.</p>`;
+    return;
+  }
+
+  tabs.innerHTML = joursDisponibles.map((d,i)=>{
+    const dt = new Date(d+'T00:00:00');
+    return `<div class="day-tab ${i===0?'selected':''}" data-d="${d}">
+      <div class="d">${JOURS[dt.getDay()]}</div><div class="n">${dt.getDate()}</div>
+    </div>`;
+  }).join('');
   tabs.querySelectorAll('.day-tab').forEach(t=>{
     t.addEventListener('click', ()=>{
       tabs.querySelectorAll('.day-tab').forEach(x=>x.classList.remove('selected'));
       t.classList.add('selected');
-      renderSlotGrid(availDays[+t.dataset.i]);
+      renderSlotGrid(t.dataset.d);
     });
   });
-  renderSlotGrid(availDays[0]);
+  renderSlotGrid(joursDisponibles[0]);
 }
 
-// Retourne, pour une fenêtre [debutFenetre, finFenetre], les vans capables
-// qui n'ont AUCUN chevauchement ce jour-là (donc libres pour ce créneau)
-function vansLibres(jourJobs, debutFenetre, finFenetre){
-  return vansCapables.filter(vId=>{
-    const jobsVan = jourJobs.filter(j=>j.van_id===vId);
-    const occupe = jobsVan.some(j=>{
-      const jd = timeToMin(j.heure_debut) - TAMPON_MIN;
-      const jf = timeToMin(j.heure_fin) + TAMPON_MIN;
-      return debutFenetre < jf && finFenetre > jd;
-    });
-    return !occupe;
-  });
-}
-
-function creneauxDisponibles(day){
-  const duree = state.dureeInterne || 60;
-  const jourJobs = jobsParJour[dateStr(day)] || [];
-  const fermeture = heureFermeture(day);
-  const slots = [];
-  for(let m = HEURE_OUVERTURE; m + duree <= fermeture; m += 30){
-    const libres = vansLibres(jourJobs, m, m + duree);
-    if(libres.length > 0){
-      slots.push({ time: minToTimeLabel(m), minutes: m });
-    }
-  }
-  return slots;
-}
-
-function renderSlotGrid(day){
+function renderSlotGrid(dateISO){
   const grid = document.getElementById('slotGrid');
-  const slots = creneauxDisponibles(day);
-  if(!slots.length){
+  const plages = plagesParJour[dateISO] || [];
+  if(!plages.length){
     grid.innerHTML = `<p class="empty-note">Aucune plage disponible cette journée-là — essaie un autre jour.</p>`;
     return;
   }
-  grid.innerHTML = slots.map(s=>`
-    <div class="slot" data-time="${s.time}">
-      <div class="time">${s.time}</div>
+  grid.innerHTML = plages.map((p,i)=>`
+    <div class="slot ${p.rabais?'eco':''}" data-i="${i}">
+      <div class="time">${p.heure_debut}</div>
       <div class="note">Plage disponible</div>
+      ${p.rabais?`<span class="badge-eco">-${Number(p.montant_rabais).toFixed(0)} $</span>`:''}
     </div>`).join('');
   grid.querySelectorAll('.slot').forEach(el=>{
     el.addEventListener('click', ()=>{
       grid.querySelectorAll('.slot').forEach(x=>x.classList.remove('selected'));
       el.classList.add('selected');
-      const s = slots.find(x=>x.time===el.dataset.time);
-      state.selectedSlot = { time: s.time, date: day };
+      const p = plages[+el.dataset.i];
+      state.selectedSlot = {
+        date: new Date(dateISO+'T00:00:00'),
+        dateStr: dateISO,
+        time: p.heure_debut,
+        heure_debut: p.heure_debut,
+        heure_fin: p.heure_fin,
+        van_id: p.van_id,
+        tech_id: p.tech_id,
+        eco: p.rabais,
+        montant_rabais: p.montant_rabais
+      };
       updateTotal(); validateStep();
     });
   });
@@ -716,7 +709,7 @@ function renderSummary(){
     <div class="summary-block">
       <h3>Rendez-vous</h3>
       <div class="summary-row"><span>${fmtDate(state.selectedSlot.date)}</span><span class="v">${state.selectedSlot.time}</span></div>
-      ${state.selectedSlot.eco?'<div class="summary-row"><span style="color:var(--green)">Rabais déplacement</span><span class="v" style="color:var(--green)">-10 $</span></div>':''}
+      ${state.selectedSlot.eco?`<div class="summary-row"><span style="color:var(--green)">Rabais déplacement</span><span class="v" style="color:var(--green)">-${Number(state.selectedSlot.montant_rabais).toFixed(0)} $</span></div>`:''}
     </div>
     <div class="summary-block">
       <h3>Coordonnées</h3>
@@ -728,6 +721,7 @@ function renderSummary(){
 }
 
 async function submitBooking(){
+  if(!state.selectedSlot) return;
   const notesPrix = [state.selectedService.note_prix, ...state.extras.filter(e=>(state.selectedExtras.get(e.id)||0)>0).map(e=>e.note_prix)]
     .filter(Boolean);
 
@@ -744,72 +738,69 @@ async function submitBooking(){
       parts.push(`${e.nom}${qty>1?` ×${qty}`:''} - ${total.toFixed(0)} $`);
     }
   });
-  if(state.selectedSlot.eco) parts.push(`Rabais déplacement - -10 $`);
+  if(state.selectedSlot.eco) parts.push(`Rabais déplacement - -${Number(state.selectedSlot.montant_rabais).toFixed(0)} $`);
   const servicesTexte = parts.join(', ');
+
+  const finalArea = document.getElementById('finalArea');
+  const btnNext = document.getElementById('btnNext');
+  btnNext.disabled = true; btnNext.textContent = 'Confirmation en cours…';
+
+  let resultat;
+  try{
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/reserver`, {
+      method:'POST',
+      headers:{ apikey: SUPABASE_ANON_KEY, Authorization:`Bearer ${SUPABASE_ANON_KEY}`, 'Content-Type':'application/json' },
+      body: JSON.stringify({
+        date: state.selectedSlot.dateStr,
+        heure_debut: state.selectedSlot.heure_debut,
+        van_id: state.selectedSlot.van_id,
+        tech_id: state.selectedSlot.tech_id,
+        services: servicesPourApi(),
+        options: optionsPourApi(),
+        client: {
+          nom: state.nom, courriel: state.courriel, telephone: state.telephone,
+          adresse: adresseComplete(), type_logement: state.typeLogement
+        },
+        notes: servicesTexte
+      })
+    });
+    resultat = await res.json();
+    if(!res.ok){
+      finalArea.innerHTML = `<div class="final-msg"><h3>Cette plage n'est plus disponible</h3><p class="sub">${resultat.erreur || 'Un problème est survenu.'} Retourne à l'étape précédente pour choisir une autre plage.</p></div>`;
+      btnNext.disabled = false; btnNext.textContent = 'Confirmer la réservation';
+      return;
+    }
+  }catch(err){
+    finalArea.innerHTML = `<div class="final-msg"><h3>Un problème est survenu</h3><p class="sub">${err.message} — réessaie ou contacte-nous directement.</p></div>`;
+    btnNext.disabled = false; btnNext.textContent = 'Confirmer la réservation';
+    return;
+  }
 
   const payload = {
     nom: state.nom, telephone: state.telephone, courriel: state.courriel,
-    adresse: `${state.adresse}, ${state.ville}, QC ${state.codePostal}`,
-    ville: state.ville, code_postal: state.codePostal,
+    adresse: adresseComplete(), ville: state.ville, code_postal: state.codePostal,
     adresse_lat: state.adresseLat, adresse_lng: state.adresseLng,
-    date: state.selectedSlot.date.toISOString().slice(0,10), heure: state.selectedSlot.time,
-    services: servicesTexte,
-    total: parseFloat(document.getElementById('totalAmt').textContent.replace(' $','').replace(',','.')),
-    type_logement: state.typeLogement,
-    service_id: state.selectedService.id,
+    date: resultat.date, heure: resultat.heure_debut,
+    services: servicesTexte, total: resultat.prix_estime,
+    type_logement: state.typeLogement, service_id: state.selectedService.id,
     superficie: state.superficie,
     options: [...state.selectedOptions], extras: Object.fromEntries(state.selectedExtras),
-    rabais_deplacement: !!state.selectedSlot.eco,
-    liste_attente: state.listeAttente,
-    notes_prix: notesPrix
+    rabais_deplacement: resultat.rabais, montant_rabais: resultat.montant_rabais,
+    liste_attente: state.listeAttente, notes_prix: notesPrix,
+    job_id: resultat.job_id, validation_requise: resultat.validation_requise
   };
-  const finalArea = document.getElementById('finalArea');
 
-  try{
-    const clientId = uuid();
-    const jobId = uuid();
-    await sbInsert('clients', {
-      id: clientId, nom: state.nom, adresse: `${state.adresse}, ${state.ville}`,
-      lat: state.adresseLat, lng: state.adresseLng,
-      courriel: state.courriel, telephone: state.telephone, type_logement: state.typeLogement
-    });
-    const dureeMin = state.dureeInterne || 60;
-    const heureDebutStr = state.selectedSlot.time.padStart(5,'0') + ':00';
-    const finMinutes = timeToMin(state.selectedSlot.time) + dureeMin;
-    const heureFinStr = minToTimeLabel(finMinutes).padStart(5,'0') + ':00';
-    const jourJobs = jobsParJour[dateStr(state.selectedSlot.date)] || [];
-    const libres = vansLibres(jourJobs, timeToMin(state.selectedSlot.time), finMinutes);
-    if(!libres.length){
-      finalArea.innerHTML = `<div class="final-msg"><h3>Cette plage vient d'être prise</h3><p class="sub">Un autre client a réservé entre-temps — retourne à l'étape précédente pour choisir une autre heure.</p></div>`;
-      return;
+  if(WEBHOOK_URL){
+    try{
+      const res = await fetch(WEBHOOK_URL, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
+      if(!res.ok) console.warn('Webhook de confirmation a répondu', res.status, '(réservation quand même confirmée)');
+    }catch(err){
+      console.warn('Webhook de confirmation injoignable (réservation quand même confirmée) :', err.message);
     }
-    await sbInsert('jobs', {
-      id: jobId, client_id: clientId, van_id: libres[0],
-      service_ids: [state.selectedService.id, ...state.options.filter(o=>state.selectedOptions.has(o.id)).map(o=>o.id)],
-      date: state.selectedSlot.date.toISOString().slice(0,10),
-      heure_debut: heureDebutStr, heure_fin: heureFinStr,
-      statut: 'confirmé',
-      adresse: `${state.adresse}, ${state.ville}`, lat: state.adresseLat, lng: state.adresseLng,
-      notes: servicesTexte
-    });
-  }catch(err){
-    finalArea.innerHTML = `<div class="final-msg"><h3>Un problème est survenu</h3><p class="sub">${err.message} — réessayez ou contactez-nous directement.</p></div>`;
-    return;
   }
 
-  if(!WEBHOOK_URL){
-    console.log('Payload prêt à envoyer (WEBHOOK_URL non configuré) :', payload);
-    finalArea.innerHTML = `<div class="final-msg"><h3>Configuration requise</h3><p class="sub">Le webhook Make.com n'est pas encore branché — les données de cette réservation sont visibles dans la console du navigateur (F12) pour l'instant.</p></div>`;
-    return;
-  }
-  try{
-    const res = await fetch(WEBHOOK_URL, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
-    if(!res.ok) throw new Error(`Le serveur a répondu ${res.status}`);
-    finalArea.innerHTML = `<div class="final-msg"><h3>Réservation confirmée</h3><p class="sub">Un courriel et un texto de confirmation s'en viennent.</p></div>`;
-    document.querySelector('.footbar').style.display='none';
-  }catch(err){
-    finalArea.innerHTML = `<div class="final-msg"><h3>Un problème est survenu</h3><p class="sub">${err.message} — réessayez ou contactez-nous directement.</p></div>`;
-  }
+  finalArea.innerHTML = `<div class="final-msg"><h3>Réservation confirmée</h3><p class="sub">Un courriel et un texto de confirmation s'en viennent.${resultat.validation_requise?' Notre équipe validera un détail de votre demande et vous contactera au besoin.':''}</p></div>`;
+  document.querySelector('.footbar').style.display='none';
 }
 
 /* ============================================================
