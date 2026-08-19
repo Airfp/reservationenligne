@@ -644,14 +644,14 @@ async function renderSlots(){
 
   renderEcoSection();
 
-  // Journée sélectionnée par défaut: la plus proche qui a au moins une plage
-  // écologique — sinon, à défaut, simplement la plus proche tout court.
-  const jourEcoLePlusProche = joursDisponibles.find(d => (plagesParJour[d]||[]).some(p=>p.rabais));
-  const jourParDefaut = jourEcoLePlusProche || joursDisponibles[0];
+  // Aucune journée n'est sélectionnée par défaut et la grille reste vide tant
+  // que le client n'a pas cliqué sur un onglet — ça évite de surcharger l'écran
+  // d'entrée de jeu (les plages écologiques ci-dessus suffisent comme aperçu).
+  grid.innerHTML = '';
 
   tabs.innerHTML = joursDisponibles.map((d)=>{
     const dt = new Date(d+'T00:00:00');
-    return `<div class="day-tab ${d===jourParDefaut?'selected':''}" data-d="${d}">
+    return `<div class="day-tab" data-d="${d}">
       <div class="d">${JOURS[dt.getDay()]}</div><div class="n">${dt.getDate()}</div>
     </div>`;
   }).join('');
@@ -662,7 +662,6 @@ async function renderSlots(){
       renderSlotGrid(t.dataset.d);
     });
   });
-  renderSlotGrid(jourParDefaut);
 }
 
 function trierChrono(a,b){
