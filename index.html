@@ -644,9 +644,14 @@ async function renderSlots(){
 
   renderEcoSection();
 
-  tabs.innerHTML = joursDisponibles.map((d,i)=>{
+  // Journée sélectionnée par défaut: la plus proche qui a au moins une plage
+  // écologique — sinon, à défaut, simplement la plus proche tout court.
+  const jourEcoLePlusProche = joursDisponibles.find(d => (plagesParJour[d]||[]).some(p=>p.rabais));
+  const jourParDefaut = jourEcoLePlusProche || joursDisponibles[0];
+
+  tabs.innerHTML = joursDisponibles.map((d)=>{
     const dt = new Date(d+'T00:00:00');
-    return `<div class="day-tab ${i===0?'selected':''}" data-d="${d}">
+    return `<div class="day-tab ${d===jourParDefaut?'selected':''}" data-d="${d}">
       <div class="d">${JOURS[dt.getDay()]}</div><div class="n">${dt.getDate()}</div>
     </div>`;
   }).join('');
@@ -657,7 +662,7 @@ async function renderSlots(){
       renderSlotGrid(t.dataset.d);
     });
   });
-  renderSlotGrid(joursDisponibles[0]);
+  renderSlotGrid(jourParDefaut);
 }
 
 function trierChrono(a,b){
@@ -706,7 +711,7 @@ function renderEcoSection(){
   // une option immédiate même si le client ne clique sur aucune journée.
   const normal = tousPlages.filter(p=>!p.rabais).sort(trierChrono).slice(0,6);
 
-  let html = `<div class="slot-section-title eco">🌱 Plages économiques — véhicule déjà dans le secteur</div>
+  let html = `<div class="slot-section-title eco">🌱 Plages écologiques — véhicule déjà dans le secteur</div>
     <div class="slot-grid">${eco.map(p=>slotCardHtml(p,true)).join('')}</div>`;
   if(normal.length){
     html += `<div class="slot-section-title">Autres disponibilités les plus proches</div>
@@ -727,7 +732,7 @@ function renderSlotGrid(dateISO){
   const normal = plages.filter(p=>!p.rabais);
   let html = '';
   if(eco.length){
-    html += `<div class="slot-section-title eco">🌱 Plages économiques</div>`;
+    html += `<div class="slot-section-title eco">🌱 Plages écologiques</div>`;
     html += eco.map(p=>slotCardHtml(p,false)).join('');
   }
   if(normal.length){
